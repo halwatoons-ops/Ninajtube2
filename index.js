@@ -1,6 +1,6 @@
-const { 
-  Client, 
-  GatewayIntentBits, 
+const {
+  Client,
+  GatewayIntentBits,
   Partials,
   REST,
   Routes,
@@ -8,107 +8,109 @@ const {
 } = require("discord.js");
 
 const express = require("express");
+const fetch = require("node-fetch");
+const Tesseract = require("tesseract.js");
 require("dotenv").config();
 
-// ------------ HARD CODED IDS ------------
-const SCREENSHOT_CHANNEL_ID = "1419946977944272947";
+// --------- HARD CODED IDs ---------
 const ROLE_ID = "1439606789233578055";
 const CLIENT_ID = "1439605306396119160";
 const GUILD_ID = "1416693493958447167";
 
-// ------------ DISCORD CLIENT ------------
+// --------- DISCORD CLIENT ---------
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.GuildMessages
   ],
   partials: [Partials.Channel]
 });
 
-// ------------ KEEP ALIVE ------------
+// --------- KEEP ALIVE SERVER (Render + UptimeRobot) ---------
 const app = express();
 app.get("/", (req, res) => res.send("Bot is Alive!"));
 app.listen(3000, () => console.log("Uptime server online"));
 
-// ------------ AUTO REGISTER SLASH COMMAND ----------
+// --------- AUTO REGISTER SLASH COMMAND ---------
 async function autoRegisterCommands() {
   const commands = [
     new SlashCommandBuilder()
       .setName("verify")
-      .setDescription("Start the verification process")
+      .setDescription("Upload a screenshot to verify your subscription.")
+      .addAttachmentOption(option =>
+        option.setName("screenshot")
+          .setDescription("Upload your subscription screenshot here")
+          .setRequired(true)
+      )
       .toJSON()
   ];
 
   const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
 
   try {
-    console.log("Registering slash commands...");
+    console.log("Registering slash command...");
     await rest.put(
       Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
       { body: commands }
     );
-    console.log("Slash commands registered!");
+    console.log("Slash command registered!");
   } catch (err) {
-    console.error("Failed to register commands:", err);
+    console.error("Failed to register command:", err);
   }
 }
 
-// ------------ INTERACTION HANDLER ------------
+// --------- HANDLE /verify COMMAND ---------
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
+  if (interaction.commandName !== "verify") return;
 
-  if (interaction.commandName === "verify") {
+  const attachment = interaction.options.getAttachment("screenshot");
+
+  // Must be a real image file
+  if (!attachment.contentType || !attachment.contentType.startsWith("image/")) {
     return interaction.reply({
-      content: "📸 **Verification channel me screenshot send karein!**",
+      content: "❌ Please upload a valid image file.",
       ephemeral: true
     });
   }
-});
 
-// ------------ MESSAGE HANDLER ------------
-client.on("messageCreate", async (msg) => {
-  if (msg.author.bot) return;
-
-  if (msg.channel.id !== SCREENSHOT_CHANNEL_ID) return;
-
-  const attachment = msg.attachments.first();
-  if (!attachment)
-    return msg.reply("❌ Screenshot bhejo.");
-
-  const url = attachment.url;
-
-  // Block videos
-  if (
-    url.endsWith(".mp4") ||
-    url.endsWith(".mov") ||
-    url.endsWith(".webm") ||
-    url.includes("video")
-  ) {
-    return msg.reply("❌ Sirf image allow hai. Video mat bhejo.");
-  }
-
-  // Only allow images
-  if (
-    !url.endsWith(".png") &&
-    !url.endsWith(".jpg") &&
-    !url.endsWith(".jpeg")
-  ) {
-    return msg.reply("❌ Ye image file nahi lag rahi.");
-  }
-
-  const role = msg.guild.roles.cache.get(ROLE_ID);
+  await interaction.reply("⏳ Processing your screenshot...");
 
   try {
-    await msg.member.roles.add(role);
-    msg.reply("✅ Verified! Aapko role mil gaya.");
+    // Download image
+    const response = await fetch(attachment.url);
+    const buffer = Buffer.from(await response.arrayBuffer());
+
+    // OCR (Reads text inside image)
+    const result = await Tesseract.recognize(buffer, "eng");
+    const text = result.data.text.toLowerCase();
+
+    console.log("Detected text:", text);
+
+    // Check if “Glitch Ninja” is in the screenshot
+    if (text.includes("glitch ninja")) {
+
+      const role = interaction.guild.roles.cache.get(ROLE_ID);
+      await interaction.member.roles.add(role);
+
+      return interaction.editReply(
+        "✅ Verified! Your subscription to Glitch Ninja is confirmed. Role assigned."
+      );
+    } else {
+      return interaction.editReply(
+        "❌ You have not subscribed to Glitch Ninja."
+      );
+    }
+
   } catch (err) {
-    console.log(err);
-    msg.reply("❌ Role nahi de paaya. Bot permissions check karo.");
+    console.error(err);
+    return interaction.editReply(
+      "❌ Failed to read the screenshot. Please upload a clearer image."
+    );
   }
 });
 
-// ------------ LOGIN ------------
+// --------- LOGIN ---------
 client.login(process.env.TOKEN).then(() => {
-  autoRegisterCommands(); // <-- Auto Slash Command Register
+  autoRegisterCommands(); // Auto slash command register
 });
