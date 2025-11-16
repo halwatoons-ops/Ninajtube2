@@ -1,12 +1,22 @@
-const { Client, GatewayIntentBits, Partials } = require("discord.js");
+const { 
+  Client, 
+  GatewayIntentBits, 
+  Partials,
+  REST,
+  Routes,
+  SlashCommandBuilder
+} = require("discord.js");
+
 const express = require("express");
 require("dotenv").config();
 
-// ---------- HARD-CODED IDS ----------
+// ------------ HARD CODED IDS ------------
 const SCREENSHOT_CHANNEL_ID = "1419946977944272947";
 const ROLE_ID = "1439606789233578055";
+const CLIENT_ID = "1439605306396119160";
+const GUILD_ID = "1416693493958447167";
 
-// ---------- CLIENT SETUP ----------
+// ------------ DISCORD CLIENT ------------
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -16,12 +26,35 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-// ---------- UPTIME SERVER ----------
+// ------------ KEEP ALIVE ------------
 const app = express();
 app.get("/", (req, res) => res.send("Bot is Alive!"));
 app.listen(3000, () => console.log("Uptime server online"));
 
-// ---------- /verify COMMAND ----------
+// ------------ AUTO REGISTER SLASH COMMAND ----------
+async function autoRegisterCommands() {
+  const commands = [
+    new SlashCommandBuilder()
+      .setName("verify")
+      .setDescription("Start the verification process")
+      .toJSON()
+  ];
+
+  const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
+
+  try {
+    console.log("Registering slash commands...");
+    await rest.put(
+      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+      { body: commands }
+    );
+    console.log("Slash commands registered!");
+  } catch (err) {
+    console.error("Failed to register commands:", err);
+  }
+}
+
+// ------------ INTERACTION HANDLER ------------
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -33,11 +66,10 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
-// ---------- MESSAGE VERIFICATION ----------
+// ------------ MESSAGE HANDLER ------------
 client.on("messageCreate", async (msg) => {
   if (msg.author.bot) return;
 
-  // Check if message is in screenshot channel
   if (msg.channel.id !== SCREENSHOT_CHANNEL_ID) return;
 
   const attachment = msg.attachments.first();
@@ -69,12 +101,14 @@ client.on("messageCreate", async (msg) => {
 
   try {
     await msg.member.roles.add(role);
-    msg.reply("✅ Verified! Role mil gaya.");
+    msg.reply("✅ Verified! Aapko role mil gaya.");
   } catch (err) {
     console.log(err);
-    msg.reply("❌ Role nahi de paaya. Permissions check karo.");
+    msg.reply("❌ Role nahi de paaya. Bot permissions check karo.");
   }
 });
 
-// ---------- LOGIN ----------
-client.login(process.env.TOKEN);
+// ------------ LOGIN ------------
+client.login(process.env.TOKEN).then(() => {
+  autoRegisterCommands(); // <-- Auto Slash Command Register
+});
