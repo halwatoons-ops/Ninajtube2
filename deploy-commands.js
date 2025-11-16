@@ -12,12 +12,17 @@ const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
 (async () => {
   try {
     console.log("Deploying Slash Commands...");
+
     await rest.put(
-      Routes.applicationGuildCommands("1439605306396119160", "1416693493958447167"),
+      Routes.applicationGuildCommands(
+        process.env.CLIENT_ID, 
+        process.env.GUILD_ID
+      ),
       { body: commands }
     );
-    console.log("Commands Registered!");
+
+    console.log("Commands Registered Successfully!");
   } catch (error) {
-    console.error(error);
+    console.error("Error Deploying Commands:", error);
   }
 })();
