@@ -1,14 +1,17 @@
 {
-  "name": "verify-bot",
+  "name": "ninjatube-verify-bot",
   "version": "1.0.0",
+  "description": "Ninjatube Protection — verification bot ",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
+  "engines": {
+    "node": "18.x"
+  },
   "dependencies": {
-    "discord.js": "^14.15.2",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "node-fetch": "^2.6.7"
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.1",
+    "express": "^4.18.2"
   }
 }
