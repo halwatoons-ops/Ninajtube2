@@ -1,7 +1,7 @@
-// =============================
-// NINJATUBE PROTECTION SYSTEM
-// FULLY FIXED GEMINI VERSION
-// =============================
+// ===============================
+// NINJATUBE VERIFICATION SYSTEM
+// Gemini OCR + Image Setup Version
+// ===============================
 
 const fs = require("fs");
 const path = require("path");
@@ -13,6 +13,7 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
+  AttachmentBuilder,
   EmbedBuilder,
   ButtonBuilder,
   ActionRowBuilder,
@@ -21,19 +22,18 @@ const {
 const express = require("express");
 require("dotenv").config();
 
-// ENV
 const TOKEN = process.env.TOKEN;
 const GEMINI_KEY = process.env.VISION_API;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-pro";
 
 if (!TOKEN || !GEMINI_KEY) {
-  console.error("Missing TOKEN or VISION_API in environment.");
+  console.error("Missing TOKEN or VISION_API.");
   process.exit(1);
 }
 
-// =============================
-// SETTINGS STORAGE
-// =============================
+// ===============================
+// STORAGE
+// ===============================
 const SETTINGS_PATH = path.join(__dirname, "settings.json");
 let settings = {};
 
@@ -43,8 +43,7 @@ try {
   } else {
     fs.writeFileSync(SETTINGS_PATH, JSON.stringify({}, null, 2));
   }
-} catch (err) {
-  console.error("Failed to read settings.json", err);
+} catch {
   settings = {};
 }
 
@@ -52,12 +51,12 @@ function saveSettings() {
   fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
 }
 
-// Store: userId → { guildId, youtubeName, roleId }
+// pending map
 const pending = new Map();
 
-// =============================
+// ===============================
 // CLIENT
-// =============================
+// ===============================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -68,41 +67,19 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-// =============================
-// KEEP ALIVE FOR RENDER
-// =============================
+// ===============================
+// KEEP ALIVE (RENDER)
+// ===============================
 const app = express();
-app.get("/", (req, res) => res.send("Ninjatube Verification System Online"));
+app.get("/", (req, res) =>
+  res.send("Ninjatube Verification System Active")
+);
 app.listen(process.env.PORT || 3000);
 
-// =============================
-// EMBEDS
-// =============================
-function embedSetup(youtubeName) {
-  return new EmbedBuilder()
-    .setTitle("🛡️ Server Verification")
-    .setDescription(
-      `Please verify your subscription to **${youtubeName}**.\n\nClick **Verify** below to continue in DM.`
-    )
-    .setColor(0xED4245)
-    .setFooter({ text: "Ninjatube Protection System" });
-}
-
-function embedProcessing() {
-  return new EmbedBuilder()
-    .setTitle("📸 Verifying Screenshot")
-    .setDescription(
-      "⚙️ Processing your screenshot...\n" +
-      "🔍 Checking your YouTube subscription...\n" +
-      "⏳ This may take a few moments."
-    )
-    .setColor(0xED4245);
-}
-
-// =============================
-// GEMINI OCR FUNCTION (FIXED)
-// =============================
-async function analyzeImageWithGemini(base64Img, expectedName) {
+// ===============================
+// GEMINI OCR FUNCTION
+// ===============================
+async function geminiExtractText(base64Img) {
   const url =
     `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_KEY}`;
 
@@ -113,7 +90,7 @@ async function analyzeImageWithGemini(base64Img, expectedName) {
         parts: [
           {
             text:
-              `Extract all visible text from the screenshot. ONLY return plain text.`
+              "Extract ONLY the YouTube channel name from this screenshot. Do NOT give extra text."
           },
           {
             inline_data: {
@@ -133,32 +110,49 @@ async function analyzeImageWithGemini(base64Img, expectedName) {
   });
 
   if (!res.ok) {
-    let txt = await res.text();
-    throw new Error("Gemini Error: " + txt);
+    throw new Error("Gemini OCR failed.");
   }
 
   const json = await res.json();
 
-  const text =
-    json?.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("\n") ||
-    "";
-
-  return text.toLowerCase().includes(expectedName.toLowerCase());
+  return json?.candidates?.[0]?.content?.parts?.[0]?.text || "";
 }
 
-// =============================
+// ===============================
+// EMBEDS
+// ===============================
+function embedSetup(channelName) {
+  return new EmbedBuilder()
+    .setTitle("🛡️ Server Verification")
+    .setDescription(
+      `Please verify your subscription to **${channelName}**.\n\nClick **Verify** to continue in DM.`
+    )
+    .setColor(0xed4245)
+    .setFooter({ text: "Ninjatube Protection System" });
+}
+
+function embedProcessing() {
+  return new EmbedBuilder()
+    .setTitle("📸 Verifying Screenshot")
+    .setDescription(
+      "⚙️ Processing your screenshot...\n🔍 Checking your subscription...\n⏳ Please wait..."
+    )
+    .setColor(0xed4245);
+}
+
+// ===============================
 // REGISTER COMMANDS
-// =============================
-async function registerCmds(guildId) {
+// ===============================
+async function registerCmd(guildId) {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
 
-  const cmd = new SlashCommandBuilder()
+  const command = new SlashCommandBuilder()
     .setName("setup")
-    .setDescription("Setup verification system")
+    .setDescription("Setup server verification system")
     .addChannelOption(o =>
       o
         .setName("channel")
-        .setDescription("Where verification embed will be posted")
+        .setDescription("Channel to post verification embed")
         .setRequired(true)
     )
     .addRoleOption(o =>
@@ -167,40 +161,38 @@ async function registerCmds(guildId) {
         .setDescription("Role to give after verification")
         .setRequired(true)
     )
-    .addStringOption(o =>
+    .addAttachmentOption(o =>
       o
-        .setName("youtube")
-        .setDescription("YouTube channel name to verify")
+        .setName("image")
+        .setDescription("Upload your YouTube channel screenshot")
         .setRequired(true)
     )
     .toJSON();
 
-  await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), {
-    body: [cmd]
-  });
+  await rest.put(
+    Routes.applicationGuildCommands(client.user.id, guildId),
+    { body: [command] }
+  );
 }
 
-// =============================
+// ===============================
 // READY
-// =============================
+// ===============================
 client.on("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
-
   for (const [gid] of client.guilds.cache) {
-    await registerCmds(gid);
+    await registerCmd(gid);
   }
 });
 
-// =============================
+// ===============================
 // GUILD JOIN
-// =============================
-client.on("guildCreate", async guild => {
-  await registerCmds(guild.id);
-});
+// ===============================
+client.on("guildCreate", guild => registerCmd(guild.id));
 
-// =============================
-// INTERACTIONS
-// =============================
+// ===============================
+// INTERACTION HANDLER
+// ===============================
 client.on("interactionCreate", async interaction => {
   if (interaction.isChatInputCommand() && interaction.commandName === "setup") {
     if (
@@ -216,12 +208,36 @@ client.on("interactionCreate", async interaction => {
 
     const channel = interaction.options.getChannel("channel");
     const role = interaction.options.getRole("role");
-    const youtubeName = interaction.options.getString("youtube");
+    const image = interaction.options.getAttachment("image");
 
+    // Read image
+    const res = await fetch(image.url);
+    const arr = await res.arrayBuffer();
+    const base64 = Buffer.from(arr).toString("base64");
+
+    // Extract channel name from screenshot
+    let channelName;
+    try {
+      channelName = await geminiExtractText(base64);
+    } catch {
+      return interaction.reply({
+        content: "❌ Failed to read screenshot. Try a clearer image.",
+        ephemeral: true
+      });
+    }
+
+    if (!channelName || channelName.length < 2) {
+      return interaction.reply({
+        content: "❌ Unable to detect channel name from screenshot.",
+        ephemeral: true
+      });
+    }
+
+    // Save
     settings[interaction.guildId] = {
       channelId: channel.id,
       roleId: role.id,
-      youtubeName
+      youtubeName: channelName.trim()
     };
     saveSettings();
 
@@ -234,12 +250,12 @@ client.on("interactionCreate", async interaction => {
     const row = new ActionRowBuilder().addComponents(button);
 
     await channel.send({
-      embeds: [embedSetup(youtubeName)],
+      embeds: [embedSetup(channelName)],
       components: [row]
     });
 
-    return interaction.reply({
-      content: "✅ Setup completed.",
+    interaction.reply({
+      content: `✅ Setup complete.\nDetected YouTube channel: **${channelName}**`,
       ephemeral: true
     });
   }
@@ -250,9 +266,10 @@ client.on("interactionCreate", async interaction => {
 
     const gid = interaction.customId.split("_")[1];
     const cfg = settings[gid];
+
     if (!cfg) {
       return interaction.reply({
-        content: "❌ Server is not configured.",
+        content: "❌ Server not configured yet.",
         ephemeral: true
       });
     }
@@ -262,14 +279,14 @@ client.on("interactionCreate", async interaction => {
       ephemeral: true
     });
 
-    const dmMsg = new EmbedBuilder()
+    const embed = new EmbedBuilder()
       .setTitle("📸 YouTube Verification")
       .setDescription(
-        `Please upload a **clear screenshot** showing you are subscribed to **${cfg.youtubeName}**.`
+        `Please upload a screenshot that shows you are subscribed to **${cfg.youtubeName}**.`
       )
-      .setColor(0x57F287);
+      .setColor(0x57f287);
 
-    await interaction.user.send({ embeds: [dmMsg] });
+    await interaction.user.send({ embeds: [embed] });
 
     pending.set(interaction.user.id, {
       guildId: gid,
@@ -279,33 +296,32 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
-// =============================
-// DM: USER SENDS SCREENSHOT
-// =============================
+// ===============================
+// DM HANDLER
+// ===============================
 client.on("messageCreate", async msg => {
-  if (msg.guild) return; // only DM
+  if (msg.guild) return;
   if (msg.author.bot) return;
 
   const pend = pending.get(msg.author.id);
   if (!pend) return;
 
-  const file = msg.attachments.first();
-  if (!file) {
-    return msg.reply("⚠️ Please upload an image screenshot.");
-  }
+  const img = msg.attachments.first();
+  if (!img) return msg.reply("⚠️ Please upload a screenshot image.");
 
   await msg.reply({ embeds: [embedProcessing()] });
 
-  const res = await fetch(file.url);
+  const res = await fetch(img.url);
   const arr = await res.arrayBuffer();
   const base64 = Buffer.from(arr).toString("base64");
 
-  let ok = false;
+  let matched = false;
   try {
-    ok = await analyzeImageWithGemini(base64, pend.youtubeName);
-  } catch (err) {
+    const extracted = await geminiExtractText(base64);
+    matched = extracted.toLowerCase().includes(pend.youtubeName.toLowerCase());
+  } catch {
     return msg.reply(
-      "⚠️ OCR Failed.\nPlease upload a clearer screenshot."
+      "⚠️ OCR Failed. Please upload a clearer screenshot."
     );
   }
 
@@ -314,19 +330,17 @@ client.on("messageCreate", async msg => {
   const guild = client.guilds.cache.get(pend.guildId);
   const member = await guild.members.fetch(msg.author.id);
 
-  if (ok) {
+  if (matched) {
     await member.roles.add(pend.roleId);
     return msg.reply(
-      `✅ Verification successful! You are subscribed to **${pend.youtubeName}**.`
+      `✅ Verified! You are subscribed to **${pend.youtubeName}**.`
+    );
+  } else {
+    return msg.reply(
+      `❌ Verification failed. You are not subscribed to **${pend.youtubeName}**.`
     );
   }
-
-  return msg.reply(
-    `❌ You have not subscribed to **${pend.youtubeName}**.`
-  );
 });
 
-// =============================
-// LOGIN
-// =============================
+// ===============================
 client.login(TOKEN);
