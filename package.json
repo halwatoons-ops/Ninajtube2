@@ -1,7 +1,6 @@
 {
-  "name": "ninjatube-verify-bot",
+  "name": "Ninjatube-Verify-Bot",
   "version": "1.0.0",
-  "description": "Ninjatube Protection — verification bot ",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
