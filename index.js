@@ -19,7 +19,7 @@ require("dotenv").config();
 
 const TOKEN = process.env.TOKEN;
 
-// storage
+// ---------- storage ----------
 const SETTINGS_PATH = path.join(__dirname, "settings.json");
 let settings = {};
 
@@ -31,30 +31,31 @@ try {
   settings = {};
 }
 
-// pending users
+// store pending users
 const pending = new Map();
 
+// ---------- client ----------
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.DirectMessages, // ⭐ REQUIRED FOR DM
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers
   ],
-  partials: [Partials.Channel]
+  partials: [
+    Partials.Channel, // ⭐ REQUIRED FOR DM CHANNELS
+    Partials.Message, // ⭐ REQUIRED FOR DM ATTACHMENTS
+    Partials.User
+  ]
 });
 
-// keep alive
+// ---------- keep-alive server ----------
 const app = express();
 app.get("/", (req, res) => res.send("Ninjatube Verification"));
 app.listen(process.env.PORT || 3000);
 
-// save settings
-function saveSettings() {
-  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
-}
-
-// ✨ verification embed
+// ---------- helper embeds ----------
 function buildVerifyEmbed(youtubeName) {
   return new EmbedBuilder()
     .setTitle("🛡️ Server Verification")
@@ -67,7 +68,6 @@ function buildVerifyEmbed(youtubeName) {
     .setFooter({ text: "Ninjatube Protection System" });
 }
 
-// ✨ processing embed
 function buildProcessingEmbed() {
   return new EmbedBuilder()
     .setTitle("📸 Verifying Screenshot")
@@ -80,7 +80,7 @@ function buildProcessingEmbed() {
     .setFooter({ text: "Ninjatube Protection System" });
 }
 
-// register commands
+// ---------- register slash commands ----------
 async function registerCommandsForAllGuilds() {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
 
@@ -115,23 +115,27 @@ async function registerCommandsForAllGuilds() {
   }
 }
 
+// ---------- ready ----------
 client.once("ready", async () => {
+  console.log(`Logged in as ${client.user.tag}`);
   await registerCommandsForAllGuilds();
-  console.log("Bot online.");
+  console.log("Commands registered.");
 });
 
-// interaction handler
+// ---------- interactions ----------
 client.on("interactionCreate", async (interaction) => {
+  // 1) /setup
   if (interaction.isChatInputCommand() && interaction.commandName === "setup") {
     if (
       !interaction.member.permissions.has(
         PermissionsBitField.Flags.Administrator
       )
-    )
+    ) {
       return interaction.reply({
-        content: "Only administrators can run this command.",
+        content: "Only administrators can use this command.",
         ephemeral: true
       });
+    }
 
     const channel = interaction.options.getChannel("channel");
     const role = interaction.options.getRole("role");
@@ -142,9 +146,11 @@ client.on("interactionCreate", async (interaction) => {
       roleId: role.id,
       youtubeName: youtube
     };
-    saveSettings();
+    fs.writeFileSync(
+      SETTINGS_PATH,
+      JSON.stringify(settings, null, 2)
+    );
 
-    // create verify button
     const button = new ButtonBuilder()
       .setCustomId(`verify_${interaction.guildId}`)
       .setLabel("Verify")
@@ -159,27 +165,28 @@ client.on("interactionCreate", async (interaction) => {
     });
 
     return interaction.reply({
-      content: "Verification system is now active.",
+      content: "Verification system configured successfully.",
       ephemeral: true
     });
   }
 
-  // verify button
+  // 2) Verify button
   if (interaction.isButton() && interaction.customId.startsWith("verify_")) {
     const guildId = interaction.customId.split("_")[1];
     const set = settings[guildId];
 
     await interaction.reply({
-      content: "I have sent you a DM.",
+      content: "I have sent you a DM with instructions.",
       ephemeral: true
     });
 
     const dmEmbed = new EmbedBuilder()
       .setTitle("📸 Verification Required")
       .setDescription(
-        `Please upload a screenshot showing that you subscribed to **${set.youtubeName}**.`
+        `Please upload a screenshot showing that you are subscribed to **${set.youtubeName}**.`
       )
-      .setColor(0x57f287);
+      .setColor(0x57f287)
+      .setFooter({ text: "Ninjatube Protection System" });
 
     await interaction.user.send({ embeds: [dmEmbed] });
 
@@ -191,23 +198,22 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
-// DM handler
+// ---------- DM image handler ----------
 client.on("messageCreate", async (msg) => {
   if (msg.author.bot) return;
-  if (msg.guild) return;
+  if (msg.guild) return; // DM only
 
   const pendingItem = pending.get(msg.author.id);
   if (!pendingItem) return;
 
   const attachment = msg.attachments.first();
   if (!attachment)
-    return msg.reply("Please upload a valid screenshot.");
+    return msg.reply("⚠️ Please upload a screenshot.");
 
   await msg.reply({ embeds: [buildProcessingEmbed()] });
 
   pending.delete(msg.author.id);
 
-  // success
   const guild = client.guilds.cache.get(pendingItem.guildId);
   const member = await guild.members.fetch(msg.author.id);
   const role = guild.roles.cache.get(pendingItem.roleId);
@@ -219,7 +225,7 @@ client.on("messageCreate", async (msg) => {
       new EmbedBuilder()
         .setTitle("✅ Verification Complete")
         .setDescription(
-          `You have been successfully verified for subscribing to **${pendingItem.youtubeName}**.`
+          `You have successfully verified your subscription to **${pendingItem.youtubeName}**.`
         )
         .setColor(0x57f287)
     ]
