@@ -1,7 +1,8 @@
-// ===============================
-// NINJATUBE VERIFICATION SYSTEM
-// Gemini OCR + Image Setup Version
-// ===============================
+// =============================================
+// NINJATUBE VERIFICATION BOT (GEMINI VERSION)
+// Auto detect channel name from image
+// Accepts keyword: "GLITCH" OR "NINJA"
+// =============================================
 
 const fs = require("fs");
 const path = require("path");
@@ -13,7 +14,6 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
-  AttachmentBuilder,
   EmbedBuilder,
   ButtonBuilder,
   ActionRowBuilder,
@@ -22,17 +22,17 @@ const {
 const express = require("express");
 require("dotenv").config();
 
+// ENV VARS
 const TOKEN = process.env.TOKEN;
 const GEMINI_KEY = process.env.VISION_API;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-pro";
 
 if (!TOKEN || !GEMINI_KEY) {
-  console.error("Missing TOKEN or VISION_API.");
+  console.error("Missing TOKEN or VISION_API environment variable.");
   process.exit(1);
 }
 
 // ===============================
-// STORAGE
+// SETTINGS STORAGE
 // ===============================
 const SETTINGS_PATH = path.join(__dirname, "settings.json");
 let settings = {};
@@ -51,7 +51,7 @@ function saveSettings() {
   fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
 }
 
-// pending map
+// userId → pending: guildId, roleId, keywords[]
 const pending = new Map();
 
 // ===============================
@@ -67,21 +67,16 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-// ===============================
-// KEEP ALIVE (RENDER)
-// ===============================
+// Keep Alive Server for Render
 const app = express();
-app.get("/", (req, res) =>
-  res.send("Ninjatube Verification System Active")
-);
+app.get("/", (req, res) => res.send("Ninjatube Verification System Running"));
 app.listen(process.env.PORT || 3000);
 
-// ===============================
-// GEMINI OCR FUNCTION
-// ===============================
-async function geminiExtractText(base64Img) {
-  const url =
-    `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_KEY}`;
+// =================================
+// GEMINI VISION OCR FUNCTION (BEST)
+// =================================
+async function geminiExtractText(buffer, mimeType) {
+  const base64 = buffer.toString("base64");
 
   const body = {
     contents: [
@@ -89,13 +84,22 @@ async function geminiExtractText(base64Img) {
         role: "user",
         parts: [
           {
-            text:
-              "Extract ONLY the YouTube channel name from this screenshot. Do NOT give extra text."
+            text: `
+You are an OCR engine. 
+Extract ALL visible text from the image.
+
+RULES:
+- Return ONLY raw text found in the screenshot.
+- Do NOT describe the image.
+- Do NOT summarize.
+- Do NOT add extra words.
+- Output must be pure text lines.
+`
           },
           {
             inline_data: {
-              mime_type: "image/jpeg",
-              data: base64Img
+              mime_type: mimeType,
+              data: base64
             }
           }
         ]
@@ -103,62 +107,69 @@ async function geminiExtractText(base64Img) {
     ]
   };
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }
+  );
 
   if (!res.ok) {
-    throw new Error("Gemini OCR failed.");
+    throw new Error("Gemini Vision API Error");
   }
 
   const json = await res.json();
-
-  return json?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  return (
+    json?.candidates?.[0]?.content?.parts
+      ?.map(p => p.text || "")
+      .join("\n")
+      .trim() || ""
+  );
 }
 
 // ===============================
 // EMBEDS
 // ===============================
-function embedSetup(channelName) {
+function setupEmbed(name) {
   return new EmbedBuilder()
-    .setTitle("🛡️ Server Verification")
+    .setTitle("🛡️ Server Verification Setup")
     .setDescription(
-      `Please verify your subscription to **${channelName}**.\n\nClick **Verify** to continue in DM.`
+      `Verification system is now active.\nUsers must verify with channel: **${name}**.\n\nClick **Verify** in the server to begin.`
     )
     .setColor(0xed4245)
     .setFooter({ text: "Ninjatube Protection System" });
 }
 
-function embedProcessing() {
+function processingEmbed() {
   return new EmbedBuilder()
     .setTitle("📸 Verifying Screenshot")
     .setDescription(
-      "⚙️ Processing your screenshot...\n🔍 Checking your subscription...\n⏳ Please wait..."
+      "⚙️ Processing your screenshot...\n🔍 Reading text...\n⏳ Please wait..."
     )
     .setColor(0xed4245);
 }
 
 // ===============================
-// REGISTER COMMANDS
+// REGISTER COMMAND
 // ===============================
-async function registerCmd(guildId) {
+async function registerCommand(guildId) {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
 
   const command = new SlashCommandBuilder()
     .setName("setup")
-    .setDescription("Setup server verification system")
+    .setDescription("Configure verification system")
     .addChannelOption(o =>
       o
         .setName("channel")
-        .setDescription("Channel to post verification embed")
+        .setDescription("Verification channel")
         .setRequired(true)
     )
     .addRoleOption(o =>
       o
         .setName("role")
-        .setDescription("Role to give after verification")
+        .setDescription("Role to give on success")
         .setRequired(true)
     )
     .addAttachmentOption(o =>
@@ -181,14 +192,14 @@ async function registerCmd(guildId) {
 client.on("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
   for (const [gid] of client.guilds.cache) {
-    await registerCmd(gid);
+    await registerCommand(gid);
   }
 });
 
 // ===============================
 // GUILD JOIN
 // ===============================
-client.on("guildCreate", guild => registerCmd(guild.id));
+client.on("guildCreate", guild => registerCommand(guild.id));
 
 // ===============================
 // INTERACTION HANDLER
@@ -213,34 +224,43 @@ client.on("interactionCreate", async interaction => {
     // Read image
     const res = await fetch(image.url);
     const arr = await res.arrayBuffer();
-    const base64 = Buffer.from(arr).toString("base64");
+    const buffer = Buffer.from(arr);
+    const mime = image.contentType;
 
-    // Extract channel name from screenshot
-    let channelName;
+    let extractedText = "";
     try {
-      channelName = await geminiExtractText(base64);
+      extractedText = await geminiExtractText(buffer, mime);
     } catch {
       return interaction.reply({
-        content: "❌ Failed to read screenshot. Try a clearer image.",
+        content: "❌ Failed to read screenshot. Upload a clearer image.",
         ephemeral: true
       });
     }
 
-    if (!channelName || channelName.length < 2) {
+    // Keywords — GLITCH or NINJA
+    const keywords = ["glitch", "ninja"];
+
+    const foundKeyword = keywords.find(k =>
+      extractedText.toLowerCase().includes(k)
+    );
+
+    if (!foundKeyword) {
       return interaction.reply({
-        content: "❌ Unable to detect channel name from screenshot.",
+        content:
+          "❌ You Havenot Subscribe to Glitch Ninja.",
         ephemeral: true
       });
     }
 
-    // Save
+    // Save settings
     settings[interaction.guildId] = {
       channelId: channel.id,
       roleId: role.id,
-      youtubeName: channelName.trim()
+      keywords
     };
     saveSettings();
 
+    // Send verify button
     const button = new ButtonBuilder()
       .setCustomId(`verify_${interaction.guildId}`)
       .setLabel("Verify")
@@ -250,17 +270,17 @@ client.on("interactionCreate", async interaction => {
     const row = new ActionRowBuilder().addComponents(button);
 
     await channel.send({
-      embeds: [embedSetup(channelName)],
+      embeds: [setupEmbed("GLITCH / NINJA")],
       components: [row]
     });
 
-    interaction.reply({
-      content: `✅ Setup complete.\nDetected YouTube channel: **${channelName}**`,
+    return interaction.reply({
+      content: "✅ Setup complete. Verification is now active.",
       ephemeral: true
     });
   }
 
-  // VERIFY BUTTON
+  // Verify button
   if (interaction.isButton()) {
     if (!interaction.customId.startsWith("verify_")) return;
 
@@ -269,20 +289,20 @@ client.on("interactionCreate", async interaction => {
 
     if (!cfg) {
       return interaction.reply({
-        content: "❌ Server not configured yet.",
+        content: "❌ Server is not configured.",
         ephemeral: true
       });
     }
 
     await interaction.reply({
-      content: "📩 I have sent you a DM.",
+      content: "📩 I have sent you a DM to continue verification.",
       ephemeral: true
     });
 
     const embed = new EmbedBuilder()
       .setTitle("📸 YouTube Verification")
       .setDescription(
-        `Please upload a screenshot that shows you are subscribed to **${cfg.youtubeName}**.`
+        "Please upload a screenshot that clearly shows you are subscribed.\n\n**It must contain 'GLITCH' or 'NINJA'.**"
       )
       .setColor(0x57f287);
 
@@ -290,14 +310,14 @@ client.on("interactionCreate", async interaction => {
 
     pending.set(interaction.user.id, {
       guildId: gid,
-      youtubeName: cfg.youtubeName,
-      roleId: cfg.roleId
+      roleId: cfg.roleId,
+      keywords: cfg.keywords
     });
   }
 });
 
 // ===============================
-// DM HANDLER
+// DM SCREENSHOT HANDLER
 // ===============================
 client.on("messageCreate", async msg => {
   if (msg.guild) return;
@@ -306,24 +326,30 @@ client.on("messageCreate", async msg => {
   const pend = pending.get(msg.author.id);
   if (!pend) return;
 
-  const img = msg.attachments.first();
-  if (!img) return msg.reply("⚠️ Please upload a screenshot image.");
+  const attachment = msg.attachments.first();
+  if (!attachment) {
+    return msg.reply("⚠️ Please upload a screenshot image.");
+  }
 
-  await msg.reply({ embeds: [embedProcessing()] });
-
-  const res = await fetch(img.url);
+  const res = await fetch(attachment.url);
   const arr = await res.arrayBuffer();
-  const base64 = Buffer.from(arr).toString("base64");
+  const buffer = Buffer.from(arr);
 
-  let matched = false;
+  await msg.reply({ embeds: [processingEmbed()] });
+
+  let text = "";
   try {
-    const extracted = await geminiExtractText(base64);
-    matched = extracted.toLowerCase().includes(pend.youtubeName.toLowerCase());
+    text = await geminiExtractText(buffer, attachment.contentType);
   } catch {
     return msg.reply(
-      "⚠️ OCR Failed. Please upload a clearer screenshot."
+      "⚠️ Failed to read screenshot. Please upload a clearer image."
     );
   }
+
+  // Check keyword GLITCH or NINJA
+  const matched = pend.keywords.some(k =>
+    text.toLowerCase().includes(k)
+  );
 
   pending.delete(msg.author.id);
 
@@ -333,13 +359,13 @@ client.on("messageCreate", async msg => {
   if (matched) {
     await member.roles.add(pend.roleId);
     return msg.reply(
-      `✅ Verified! You are subscribed to **${pend.youtubeName}**.`
-    );
-  } else {
-    return msg.reply(
-      `❌ Verification failed. You are not subscribed to **${pend.youtubeName}**.`
+      "✅ Verification successful! You are now verified."
     );
   }
+
+  return msg.reply(
+    "❌ Verification failed. Screenshot does not contain required text."
+  );
 });
 
 // ===============================
