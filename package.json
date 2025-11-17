@@ -1,6 +1,7 @@
 {
-  "name": "verify-bot",
+  "name": "ninjatube-verify-bot",
   "version": "1.0.0",
+  "description": "Ninjatube Protection — verification bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -12,7 +13,6 @@
     "discord.js": "^14.14.1",
     "dotenv": "^16.4.1",
     "express": "^4.18.2",
-    "tesseract.js": "^4.0.2",
-    "node-fetch": "^2.6.7"
+    "@tesseract.js/node": "^4.0.2"
   }
 }
