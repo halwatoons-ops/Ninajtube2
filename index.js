@@ -1,280 +1,203 @@
-// index.js
 const fs = require("fs");
 const path = require("path");
+const fetch = require("node-fetch");
+const express = require("express");
 const {
   Client,
   GatewayIntentBits,
   Partials,
-  REST,
-  Routes,
-  SlashCommandBuilder,
+  PermissionsBitField,
+  ActionRowBuilder,
   ButtonStyle,
   ButtonBuilder,
-  ActionRowBuilder,
-  EmbedBuilder,
-  PermissionsBitField
+  EmbedBuilder
 } = require("discord.js");
-const express = require("express");
 require("dotenv").config();
 
-const OCR_KEY = process.env.OCR_KEY;
 const TOKEN = process.env.TOKEN;
-
-if (!OCR_KEY || !TOKEN) {
-  console.error("Missing TOKEN or OCR_KEY in environment variables!");
+const HF_TOKEN = process.env.HF_TOKEN;
+if (!TOKEN || !HF_TOKEN) {
+  console.log("Missing TOKEN or HF_TOKEN");
   process.exit(1);
 }
 
-// -------- settings storage --------
+// ---------- storage ----------
 const SETTINGS_PATH = path.join(__dirname, "settings.json");
-let settings = fs.existsSync(SETTINGS_PATH)
-  ? JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf8"))
-  : {};
+let settings = {};
+if (fs.existsSync(SETTINGS_PATH))
+  settings = JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf8"));
+else fs.writeFileSync(SETTINGS_PATH, JSON.stringify({}, null, 2));
 
-// save settings
-function saveSettings() {
-  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
-}
+// pending = userId -> { guildId, channelId, roleId, youtubeName }
+const pending = new Map();
 
-// -------- client --------
+// ---------- client ----------
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers
-  ],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
   partials: [Partials.Channel]
 });
 
-// verification queue (per user)
-const waiting = new Map();
-
 // uptime server
 const app = express();
-app.get("/", (req, res) => res.send("Ninjatube Verification System"));
+app.get("/", (_, res) => res.send("Ninjatube Verification System Running"));
 app.listen(process.env.PORT || 3000);
 
-// -------- helper embeds --------
-function embedVerify(channelName) {
+// ---------- OCR ----------
+async function runOCR(imageBuffer) {
+  const response = await fetch(
+    "https://api-inference.huggingface.co/models/Qwen/Qwen2-VL-2B-Instruct",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${HF_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        inputs: {
+          prompt: "Extract all visible text from this image.",
+          image: imageBuffer.toString("base64")
+        }
+      })
+    }
+  );
+
+  const data = await response.json();
+  try {
+    return data[0].generated_text || "";
+  } catch {
+    return "";
+  }
+}
+
+// ---------- UI embeds ----------
+function setupEmbed(youtubeName) {
   return new EmbedBuilder()
-    .setTitle("🛡️ Server Verification")
+    .setTitle("🛡️ Verification Required")
     .setDescription(
-      `To access this server, please verify your subscription to **${channelName}**.\n\nClick the button below to begin.`
+      `Please upload a screenshot showing you are subscribed to **${youtubeName}**.\n` +
+      `Click **Verify** to continue.`
     )
     .setColor(0xed4245)
     .setFooter({ text: "Ninjatube Protection System" });
 }
 
-function embedAskUpload(channelName) {
+function processingEmbed() {
   return new EmbedBuilder()
-    .setTitle("📸 Upload Your Screenshot")
+    .setTitle("📸 Verifying Screenshot")
     .setDescription(
-      `Please upload a clear screenshot showing:\n\n✓ **Subscribed**\n✓ **${channelName}**\n\nI will verify it automatically.`
+      "⚙️ Processing your screenshot...\n" +
+      "🔍 Checking subscription...\n" +
+      "⏳ Please wait a moment..."
     )
-    .setColor(0xed4245)
-    .setFooter({ text: "Ninjatube Protection System" });
-}
-
-function embedProcessing() {
-  return new EmbedBuilder()
-    .setTitle("🔍 Verifying Screenshot")
-    .setDescription("Processing your screenshot… Please wait a few moments.")
     .setColor(0xed4245);
 }
 
-// -------- READY --------
-client.once("ready", async () => {
+// ---------- READY ----------
+client.on("ready", () => {
   console.log(`Logged in as ${client.user.tag}`);
-  client.user.setPresence({
-    activities: [{ name: "Verifying subscribers" }],
-    status: "online"
-  });
-
-  // auto register when ready
-  const rest = new REST({ version: "10" }).setToken(TOKEN);
-  const slash = new SlashCommandBuilder()
-    .setName("setup")
-    .setDescription("Setup verification channel & role & YouTube name")
-    .addChannelOption(o =>
-      o.setName("channel").setDescription("Verification channel").setRequired(true)
-    )
-    .addRoleOption(o =>
-      o.setName("role").setDescription("Role to give after verification").setRequired(true)
-    )
-    .addStringOption(o =>
-      o.setName("youtube").setDescription("Exact YouTube channel name").setRequired(true)
-    )
-    .toJSON();
-
-  for (const [gid] of client.guilds.cache) {
-    await rest.put(Routes.applicationGuildCommands(client.application.id, gid), {
-      body: [slash],
-    });
-    console.log("Registered /setup →", gid);
-  }
 });
 
-// -------- INTERACTIONS --------
-client.on("interactionCreate", async interaction => {
-  // SLASH COMMAND
-  if (interaction.isChatInputCommand() && interaction.commandName === "setup") {
-    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-      return interaction.reply({
-        content: "❌ Only administrators can run this command.",
-        ephemeral: true
-      });
-    }
+// ---------- /setup ----------
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === "setup") {
+    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator))
+      return interaction.reply({ content: "Admin only.", ephemeral: true });
 
     const channel = interaction.options.getChannel("channel");
     const role = interaction.options.getRole("role");
     const youtube = interaction.options.getString("youtube");
 
     settings[interaction.guildId] = {
-      verifyChannel: channel.id,
+      channelId: channel.id,
       roleId: role.id,
       youtubeName: youtube
     };
-    saveSettings();
+    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
 
-    const button = new ButtonBuilder()
+    const verifyBtn = new ButtonBuilder()
       .setCustomId(`verify_${interaction.guildId}`)
       .setLabel("Verify")
-      .setStyle(ButtonStyle.Success)
-      .setEmoji("🔒");
+      .setEmoji("🔒")
+      .setStyle(ButtonStyle.Success);
 
-    const row = new ActionRowBuilder().addComponents(button);
+    const row = new ActionRowBuilder().addComponents(verifyBtn);
 
-    await channel.send({
-      embeds: [embedVerify(youtube)],
-      components: [row]
-    });
+    await channel.send({ embeds: [setupEmbed(youtube)], components: [row] });
 
     return interaction.reply({
-      content: `✅ Setup complete.\nVerification posted in ${channel}.`,
+      content: `Setup complete! Verification posted in ${channel}.`,
       ephemeral: true
     });
   }
+});
 
-  // VERIFY BUTTON
-  if (interaction.isButton() && interaction.customId.startsWith("verify_")) {
+// ---------- Verify Button ----------
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isButton()) return;
+
+  if (interaction.customId.startsWith("verify_")) {
     const guildId = interaction.customId.split("_")[1];
-    const set = settings[guildId];
+    const conf = settings[guildId];
+    if (!conf) return interaction.reply({ content: "Setup missing.", ephemeral: true });
 
-    if (!set)
-      return interaction.reply({ content: "❌ Setup not completed.", ephemeral: true });
-
-    // Ask user to upload screenshot
-    const msg = await interaction.channel.send({
-      content: `<@${interaction.user.id}>`,
-      embeds: [embedAskUpload(set.youtubeName)]
-    });
-
-    waiting.set(interaction.user.id, {
+    pending.set(interaction.user.id, {
       guildId,
-      stepMessage: msg.id,
-      youtube: set.youtubeName,
-      roleId: set.roleId
+      channelId: interaction.channel.id,
+      roleId: conf.roleId,
+      youtubeName: conf.youtubeName
     });
 
-    return interaction.reply({ content: "Check the new message below.", ephemeral: true });
+    return interaction.reply({
+      content: "Please upload your screenshot **in this channel**.",
+      ephemeral: true
+    });
   }
 });
 
-// -------- MESSAGE HANDLER (screenshot upload) --------
-client.on("messageCreate", async msg => {
-  if (!msg.guild) return;
+// ---------- Screenshot Handler ----------
+client.on("messageCreate", async (msg) => {
   if (msg.author.bot) return;
+  if (!pending.has(msg.author.id)) return;
 
-  const user = waiting.get(msg.author.id);
-  if (!user) return;
+  const attach = msg.attachments.first();
+  if (!attach) return;
 
-  const set = settings[user.guildId];
-  if (!set) return;
+  const info = pending.get(msg.author.id);
+  pending.delete(msg.author.id);
 
-  // must upload in verification channel
-  if (msg.channel.id !== set.verifyChannel) return;
+  await msg.reply({ embeds: [processingEmbed()] });
 
-  const file = msg.attachments.first();
-  if (!file) return;
+  const res = await fetch(attach.url);
+  const buf = Buffer.from(await res.arrayBuffer());
 
-  // delete user's screenshot message to clean channel
-  msg.delete().catch(() => {});
+  const text = (await runOCR(buf)).toLowerCase();
+  const expected = info.youtubeName.toLowerCase();
 
-  // send processing embed
-  const processMsg = await msg.channel.send({
-    content: `<@${msg.author.id}>`,
-    embeds: [embedProcessing()]
-  });
+  const guild = client.guilds.cache.get(info.guildId);
+  const member = await guild.members.fetch(msg.author.id);
 
-  // OCR API
-  try {
-    const form = new FormData();
-    form.append("apikey", OCR_KEY);
-    form.append("language", "eng");
-    form.append("isOverlayRequired", "false");
-    form.append("OCREngine", "2");
-    form.append("url", file.url);
-
-    const res = await fetch("https://api.ocr.space/parse/image", {
-      method: "POST",
-      body: form
-    });
-
-    const data = await res.json();
-    const text = (
-      data?.ParsedResults?.[0]?.ParsedText || ""
-    ).toLowerCase();
-
-    const expected = user.youtube.toLowerCase();
-
-    if (text.includes("subscribed") && text.includes(expected)) {
-      // give role
-      const guild = client.guilds.cache.get(user.guildId);
-      const member = await guild.members.fetch(msg.author.id);
-      const role = guild.roles.cache.get(user.roleId);
-
-      await member.roles.add(role);
-
-      waiting.delete(msg.author.id);
-
-      return processMsg.edit({
-        embeds: [
-          new EmbedBuilder()
-            .setTitle("✅ Verification Successful")
-            .setDescription(
-              `You are subscribed to **${user.youtube}**.\nRole has been assigned.`
-            )
-            .setColor(0x57f287)
-        ]
-      });
-    } else {
-      waiting.delete(msg.author.id);
-
-      return processMsg.edit({
-        embeds: [
-          new EmbedBuilder()
-            .setTitle("❌ Verification Failed")
-            .setDescription(
-              `You are **NOT subscribed** to **${user.youtube}**.\nPlease upload a valid screenshot.`
-            )
-            .setColor(0xed4245)
-        ]
-      });
-    }
-  } catch (e) {
-    waiting.delete(msg.author.id);
-
-    return msg.channel.send({
+  if (text.includes(expected)) {
+    await member.roles.add(info.roleId);
+    return msg.reply({
       embeds: [
         new EmbedBuilder()
-          .setTitle("⚠️ OCR Error")
-          .setDescription("Failed to read screenshot. Try again with a clearer image.")
+          .setTitle("✅ Verified Successfully")
+          .setDescription(`You are subscribed to **${info.youtubeName}**.\nRole granted!`)
+          .setColor(0x57f287)
+      ]
+    });
+  } else {
+    return msg.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle("❌ Verification Failed")
+          .setDescription(`You are **not subscribed** to **${info.youtubeName}**.`)
           .setColor(0xed4245)
       ]
     });
   }
 });
 
-// LOGIN
 client.login(TOKEN);
