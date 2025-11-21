@@ -1,203 +1,246 @@
 const fs = require("fs");
 const path = require("path");
 const fetch = require("node-fetch");
-const express = require("express");
 const {
   Client,
   GatewayIntentBits,
   Partials,
+  EmbedBuilder,
   PermissionsBitField,
   ActionRowBuilder,
-  ButtonStyle,
   ButtonBuilder,
-  EmbedBuilder
+  ButtonStyle
 } = require("discord.js");
 require("dotenv").config();
 
 const TOKEN = process.env.TOKEN;
 const HF_TOKEN = process.env.HF_TOKEN;
+
 if (!TOKEN || !HF_TOKEN) {
-  console.log("Missing TOKEN or HF_TOKEN");
+  console.error("❌ Missing TOKEN or HF_TOKEN in Render Environment");
   process.exit(1);
 }
 
-// ---------- storage ----------
+// LOAD SETTINGS
 const SETTINGS_PATH = path.join(__dirname, "settings.json");
 let settings = {};
-if (fs.existsSync(SETTINGS_PATH))
-  settings = JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf8"));
-else fs.writeFileSync(SETTINGS_PATH, JSON.stringify({}, null, 2));
+try {
+  if (fs.existsSync(SETTINGS_PATH))
+    settings = JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf8"));
+} catch {
+  settings = {};
+}
 
-// pending = userId -> { guildId, channelId, roleId, youtubeName }
-const pending = new Map();
+// SAVE SETTINGS
+function saveSettings() {
+  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+}
 
-// ---------- client ----------
+// CLIENT
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.DirectMessages
+  ],
   partials: [Partials.Channel]
 });
 
-// uptime server
-const app = express();
-app.get("/", (_, res) => res.send("Ninjatube Verification System Running"));
-app.listen(process.env.PORT || 3000);
-
-// ---------- OCR ----------
-async function runOCR(imageBuffer) {
-  const response = await fetch(
+// OCR FUNCTION USING QWEN2-VL-2B-INSTRUCT
+async function readTextFromImage(buffer) {
+  const res = await fetch(
     "https://api-inference.huggingface.co/models/Qwen/Qwen2-VL-2B-Instruct",
     {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${HF_TOKEN}`,
-        "Content-Type": "application/json"
+        Authorization: `Bearer ${HF_TOKEN}`
       },
-      body: JSON.stringify({
-        inputs: {
-          prompt: "Extract all visible text from this image.",
-          image: imageBuffer.toString("base64")
-        }
-      })
+      body: buffer
     }
   );
 
-  const data = await response.json();
+  const json = await res.json();
   try {
-    return data[0].generated_text || "";
+    return json[0].generated_text.toLowerCase();
   } catch {
     return "";
   }
 }
 
-// ---------- UI embeds ----------
-function setupEmbed(youtubeName) {
-  return new EmbedBuilder()
-    .setTitle("🛡️ Verification Required")
-    .setDescription(
-      `Please upload a screenshot showing you are subscribed to **${youtubeName}**.\n` +
-      `Click **Verify** to continue.`
-    )
-    .setColor(0xed4245)
-    .setFooter({ text: "Ninjatube Protection System" });
-}
+// DM_VERIFICATION MAP
+const pending = new Map();
 
-function processingEmbed() {
-  return new EmbedBuilder()
-    .setTitle("📸 Verifying Screenshot")
-    .setDescription(
-      "⚙️ Processing your screenshot...\n" +
-      "🔍 Checking subscription...\n" +
-      "⏳ Please wait a moment..."
-    )
-    .setColor(0xed4245);
-}
-
-// ---------- READY ----------
+// READY
 client.on("ready", () => {
   console.log(`Logged in as ${client.user.tag}`);
+  client.user.setPresence({
+    activities: [{ name: "Verifying Subscribers" }],
+    status: "online"
+  });
 });
 
-// ---------- /setup ----------
-client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
-  if (interaction.commandName === "setup") {
-    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator))
-      return interaction.reply({ content: "Admin only.", ephemeral: true });
+// INTERACTION HANDLER
+client.on("interactionCreate", async interaction => {
+  // ------------------------------------------
+  //            /setup COMMAND
+  // ------------------------------------------
+  if (interaction.isChatInputCommand() && interaction.commandName === "setup") {
+    const member = interaction.member;
+    if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+      return interaction.reply({
+        content: "❌ You must be Administrator.",
+        ephemeral: true
+      });
+    }
 
     const channel = interaction.options.getChannel("channel");
     const role = interaction.options.getRole("role");
-    const youtube = interaction.options.getString("youtube");
+    const screenshot = interaction.options.getAttachment("screenshot");
 
+    if (!screenshot.contentType.startsWith("image/")) {
+      return interaction.reply({
+        content: "❌ Screenshot must be an image.",
+        ephemeral: true
+      });
+    }
+
+    // Download owner screenshot
+    const r = await fetch(screenshot.url);
+    const buf = Buffer.from(await r.arrayBuffer());
+
+    // Extract text
+    const extracted = await readTextFromImage(buf);
+
+    if (!extracted || extracted.length < 3) {
+      return interaction.reply({
+        content: "❌ Could not read text from screenshot. Use a clearer image.",
+        ephemeral: true
+      });
+    }
+
+    // Save
     settings[interaction.guildId] = {
       channelId: channel.id,
       roleId: role.id,
-      youtubeName: youtube
+      verifyText: extracted
     };
-    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+    saveSettings();
 
-    const verifyBtn = new ButtonBuilder()
+    // Prepare verify button
+    const btn = new ButtonBuilder()
       .setCustomId(`verify_${interaction.guildId}`)
       .setLabel("Verify")
       .setEmoji("🔒")
       .setStyle(ButtonStyle.Success);
 
-    const row = new ActionRowBuilder().addComponents(verifyBtn);
+    const row = new ActionRowBuilder().addComponents(btn);
 
-    await channel.send({ embeds: [setupEmbed(youtube)], components: [row] });
+    const embed = new EmbedBuilder()
+      .setTitle("🛡️ Verification Required")
+      .setDescription(
+        "Tap **Verify** and complete verification in DM.\n\n" +
+          "Make sure your subscription screenshot is clear."
+      )
+      .setColor(0xed4245);
+
+    await channel.send({ embeds: [embed], components: [row] });
 
     return interaction.reply({
-      content: `Setup complete! Verification posted in ${channel}.`,
+      content: "✅ Setup complete! Verification button posted.",
       ephemeral: true
     });
   }
-});
 
-// ---------- Verify Button ----------
-client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isButton()) return;
+  // ------------------------------------------
+  //             VERIFY BUTTON
+  // ------------------------------------------
+  if (interaction.isButton() && interaction.customId.startsWith("verify_")) {
+    const gid = interaction.customId.split("_")[1];
+    const s = settings[gid];
 
-  if (interaction.customId.startsWith("verify_")) {
-    const guildId = interaction.customId.split("_")[1];
-    const conf = settings[guildId];
-    if (!conf) return interaction.reply({ content: "Setup missing.", ephemeral: true });
+    if (!s)
+      return interaction.reply({
+        content: "❌ Server is not configured.",
+        ephemeral: true
+      });
 
-    pending.set(interaction.user.id, {
-      guildId,
-      channelId: interaction.channel.id,
-      roleId: conf.roleId,
-      youtubeName: conf.youtubeName
-    });
+    try {
+      await interaction.reply({
+        content: "📨 Check your DM to continue.",
+        ephemeral: true
+      });
 
-    return interaction.reply({
-      content: "Please upload your screenshot **in this channel**.",
-      ephemeral: true
-    });
+      const dmEmbed = new EmbedBuilder()
+        .setTitle("📸 Upload Screenshot")
+        .setDescription(
+          "Please upload your **subscription screenshot** in this DM.\n\n" +
+            "I will verify automatically."
+        )
+        .setColor(0x57f287);
+
+      await interaction.user.send({ embeds: [dmEmbed] });
+
+      pending.set(interaction.user.id, {
+        guildId: gid,
+        verifyText: s.verifyText,
+        roleId: s.roleId
+      });
+    } catch {
+      interaction.reply({
+        content: "❌ Please enable DMs to verify.",
+        ephemeral: true
+      });
+    }
   }
 });
 
-// ---------- Screenshot Handler ----------
-client.on("messageCreate", async (msg) => {
+// ------------------------------------------
+//           DM SCREENSHOT HANDLER
+// ------------------------------------------
+client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
-  if (!pending.has(msg.author.id)) return;
+  if (msg.guild) return;
+
+  const p = pending.get(msg.author.id);
+  if (!p) return;
 
   const attach = msg.attachments.first();
-  if (!attach) return;
+  if (!attach)
+    return msg.reply("⚠️ Please upload a screenshot.");
 
-  const info = pending.get(msg.author.id);
-  pending.delete(msg.author.id);
+  if (!attach.contentType.startsWith("image/"))
+    return msg.reply("❌ File must be an image.");
 
-  await msg.reply({ embeds: [processingEmbed()] });
+  msg.reply("🔍 **Reading screenshot… Please wait…**");
 
-  const res = await fetch(attach.url);
-  const buf = Buffer.from(await res.arrayBuffer());
+  const r = await fetch(attach.url);
+  const buf = Buffer.from(await r.arrayBuffer());
 
-  const text = (await runOCR(buf)).toLowerCase();
-  const expected = info.youtubeName.toLowerCase();
+  const text = await readTextFromImage(buf);
 
-  const guild = client.guilds.cache.get(info.guildId);
+  if (!text) {
+    pending.delete(msg.author.id);
+    return msg.reply("❌ Failed to read text. Try a clearer image.");
+  }
+
+  const guild = client.guilds.cache.get(p.guildId);
   const member = await guild.members.fetch(msg.author.id);
 
-  if (text.includes(expected)) {
-    await member.roles.add(info.roleId);
-    return msg.reply({
-      embeds: [
-        new EmbedBuilder()
-          .setTitle("✅ Verified Successfully")
-          .setDescription(`You are subscribed to **${info.youtubeName}**.\nRole granted!`)
-          .setColor(0x57f287)
-      ]
-    });
+  // MATCH CHECK
+  if (text.includes(p.verifyText.trim().toLowerCase())) {
+    const role = guild.roles.cache.get(p.roleId);
+    await member.roles.add(role);
+
+    pending.delete(msg.author.id);
+
+    return msg.reply("✅ **Verified!** You are now subscribed.");
   } else {
-    return msg.reply({
-      embeds: [
-        new EmbedBuilder()
-          .setTitle("❌ Verification Failed")
-          .setDescription(`You are **not subscribed** to **${info.youtubeName}**.`)
-          .setColor(0xed4245)
-      ]
-    });
+    pending.delete(msg.author.id);
+    return msg.reply("❌ You have NOT subscribed.");
   }
 });
 
+// LOGIN
 client.login(TOKEN);
