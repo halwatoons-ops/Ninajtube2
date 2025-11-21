@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const fetch = require("node-fetch");
+const express = require("express"); // ADDED
 const {
   Client,
   GatewayIntentBits,
@@ -12,6 +13,16 @@ const {
   ButtonStyle
 } = require("discord.js");
 require("dotenv").config();
+
+// ------------------------------------
+// EXPRESS SERVER FOR RENDER
+// ------------------------------------
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get("/", (req, res) => res.send("NinjaTube Bot Running ✔"));
+app.listen(PORT, () => console.log("🌐 Webserver running on PORT " + PORT));
+// ------------------------------------
 
 const TOKEN = process.env.TOKEN;
 const HF_TOKEN = process.env.HF_TOKEN;
@@ -48,7 +59,7 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-// OCR FUNCTION USING QWEN2-VL-2B-INSTRUCT
+// OCR FUNCTION USING QWEN2-VL
 async function readTextFromImage(buffer) {
   const res = await fetch(
     "https://api-inference.huggingface.co/models/Qwen/Qwen2-VL-2B-Instruct",
@@ -61,7 +72,8 @@ async function readTextFromImage(buffer) {
     }
   );
 
-  const json = await res.json();
+  let json = await res.json();
+
   try {
     return json[0].generated_text.toLowerCase();
   } catch {
@@ -69,7 +81,7 @@ async function readTextFromImage(buffer) {
   }
 }
 
-// DM_VERIFICATION MAP
+// DM_VERIFICATION
 const pending = new Map();
 
 // READY
@@ -83,9 +95,7 @@ client.on("ready", () => {
 
 // INTERACTION HANDLER
 client.on("interactionCreate", async interaction => {
-  // ------------------------------------------
-  //            /setup COMMAND
-  // ------------------------------------------
+  // /setup COMMAND
   if (interaction.isChatInputCommand() && interaction.commandName === "setup") {
     const member = interaction.member;
     if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
@@ -128,7 +138,6 @@ client.on("interactionCreate", async interaction => {
     };
     saveSettings();
 
-    // Prepare verify button
     const btn = new ButtonBuilder()
       .setCustomId(`verify_${interaction.guildId}`)
       .setLabel("Verify")
@@ -148,14 +157,12 @@ client.on("interactionCreate", async interaction => {
     await channel.send({ embeds: [embed], components: [row] });
 
     return interaction.reply({
-      content: "✅ Setup complete! Verification button posted.",
+      content: "✅ Setup complete!",
       ephemeral: true
     });
   }
 
-  // ------------------------------------------
-  //             VERIFY BUTTON
-  // ------------------------------------------
+  // VERIFY BUTTON
   if (interaction.isButton() && interaction.customId.startsWith("verify_")) {
     const gid = interaction.customId.split("_")[1];
     const s = settings[gid];
@@ -196,9 +203,7 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
-// ------------------------------------------
-//           DM SCREENSHOT HANDLER
-// ------------------------------------------
+// DM HANDLER
 client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
   if (msg.guild) return;
@@ -228,14 +233,13 @@ client.on("messageCreate", async msg => {
   const guild = client.guilds.cache.get(p.guildId);
   const member = await guild.members.fetch(msg.author.id);
 
-  // MATCH CHECK
   if (text.includes(p.verifyText.trim().toLowerCase())) {
     const role = guild.roles.cache.get(p.roleId);
     await member.roles.add(role);
 
     pending.delete(msg.author.id);
 
-    return msg.reply("✅ **Verified!** You are now subscribed.");
+    return msg.reply("✅ **Verified!** Role added.");
   } else {
     pending.delete(msg.author.id);
     return msg.reply("❌ You have NOT subscribed.");
